@@ -285,22 +285,23 @@ class VideoAnalyzerApp:
             logger.error("첫 프레임을 추출할 수 없습니다")
             return []
 
-        # OCR 엔진 가용성 사전 확인
-        ocr_available = False
-        try:
-            self.ocr_engine.recognize(first_frame)
-            ocr_available = True
-        except Exception as e:
-            logger.warning("OCR 엔진 초기화 실패, 텍스트 ROI 탐지 비활성화: %s", e)
-
         # DynamicROIDetector로 ROI 탐지
+        # ★ OCR 엔진을 전달하지 않아 TextROIDetector가 자체 엔진 생성
+        # (confidence_threshold=0.3, use_space_char=True — 전체 프레임 스캔에 최적)
+        # App의 OCR 엔진(0.7 threshold)은 ROI 영역 정밀 인식용이므로 별도 유지
         dynamic_detector = DynamicROIDetector(
-            config=DynamicROIConfig(
-                enable_text_detection=ocr_available,
-            ),
-            ocr_engine=self.ocr_engine if ocr_available else None,
+            config=DynamicROIConfig(enable_text_detection=True),
+            ocr_engine=None,
         )
-        detected_rois = dynamic_detector.detect(first_frame)
+
+        try:
+            detected_rois = dynamic_detector.detect(first_frame)
+        except Exception as e:
+            logger.warning("텍스트 ROI 탐지 중 예외, 파형 전용으로 재시도: %s", e)
+            dynamic_detector = DynamicROIDetector(
+                config=DynamicROIConfig(enable_text_detection=False),
+            )
+            detected_rois = dynamic_detector.detect(first_frame)
 
         if not detected_rois:
             logger.warning("자동 ROI 탐지 결과 없음")
@@ -958,6 +959,14 @@ def parse_args() -> argparse.Namespace:
 def main():
     """메인 진입점"""
     args = parse_args()
+
+    # ★ Windows DLL 충돌 방지: 프로세스 최초 시점에서 torch DLL 선점 로드
+    # paddleocr/albumentations가 torch를 간접 import하기 전에
+    # torch의 libiomp5md.dll을 먼저 로드하여 DLL 버전 충돌 방지
+    try:
+        import torch  # noqa: F401 - Windows DLL preload at process start
+    except (ImportError, OSError):
+        pass  # torch 미설치 또는 로드 실패 시 무시
 
     # 디버그 모드
     if args.debug:
