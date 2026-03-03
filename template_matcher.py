@@ -4,6 +4,7 @@ ColorTemplateDetector와 AnchorDetector 등에서 공통으로 사용하는
 템플릿 매칭 전략을 독립 모듈로 제공합니다.
 
 매칭 전략 (캐스케이드):
+    0차: 원본 픽셀 직접 매칭 (TM_CCOEFF_NORMED, 1:1 스케일, 임계값 0.90)
     1차: 에지 기반 매칭 (Canny + TM_CCOEFF_NORMED, 멀티스케일)
     2차: 특징점 기반 매칭 (AKAZE + RANSAC homography)
     3차: 마스크 기반 상관관계 (TM_CCORR_NORMED + NaN/Inf 가드)
@@ -38,13 +39,13 @@ class MatchResult(NamedTuple):
         x: 매칭 위치 X 좌표 (프레임 기준)
         y: 매칭 위치 Y 좌표 (프레임 기준)
         score: 매칭 신뢰도 (0.0~1.0)
-        method: 사용된 매칭 방법 ("edge", "feature", "masked")
+        method: 사용된 매칭 방법 ("raw", "edge", "feature", "masked")
     """
 
     x: int
     y: int
     score: float
-    method: str  # "edge", "feature", "masked"
+    method: str  # "raw", "edge", "feature", "masked"
 
 
 class MatchCandidate(NamedTuple):
@@ -73,6 +74,8 @@ class MatcherConfig:
     """캐스케이드 템플릿 매칭 설정
 
     Attributes:
+        raw_pixel_match_enabled: Tier 0 원본 픽셀 직접 매칭 활성화 여부
+        raw_pixel_match_threshold: 원본 픽셀 매칭 최소 신뢰도 (TM_CCOEFF_NORMED)
         edge_match_threshold: 에지 매칭 최소 신뢰도 (TM_CCOEFF_NORMED)
         canny_threshold1: Canny 에지 검출 하한
         canny_threshold2: Canny 에지 검출 상한
@@ -84,6 +87,11 @@ class MatcherConfig:
         fallback_match_threshold: mask 폴백 매칭 임계값
     """
 
+    # --- Tier 0: 원본 픽셀 직접 매칭 (빠른 경로) ---
+    raw_pixel_match_enabled: bool = True
+    raw_pixel_match_threshold: float = 0.90
+
+    # --- Tier 1: 에지 기반 매칭 ---
     edge_match_threshold: float = 0.55
     canny_threshold1: int = 50
     canny_threshold2: int = 200
@@ -120,7 +128,7 @@ class MatcherConfig:
 class TemplateMatcher:
     """캐스케이드 전략 기반 템플릿 매칭 엔진
 
-    에지 → 특징점 → 마스크 상관의 3단계 폴백으로
+    원본 픽셀 → 에지 → 특징점 → 마스크 상관의 4단계 폴백으로
     다양한 조건에서 견고한 매칭을 수행합니다.
 
     Args:
@@ -146,6 +154,7 @@ class TemplateMatcher:
     ) -> MatchResult | None:
         """캐스케이드 전략으로 프레임 내 템플릿 위치를 찾습니다.
 
+        0차: 원본 픽셀 직접 매칭 (마스크 없는 경우만, 빠른 경로)
         1차: 에지 기반 매칭 (멀티스케일)
         2차: AKAZE 특징점 매칭
         3차: mask 기반 상관관계 폴백
@@ -160,6 +169,22 @@ class TemplateMatcher:
             MatchResult 또는 매칭 실패 시 None
         """
         # mask=None은 각 하위 메서드에서 자체 처리 (불필요한 제로 배열 생성 방지)
+
+        # --- 0차: 원본 픽셀 직접 매칭 (빠른 경로) ---
+        # 마스크가 없는 깨끗한 템플릿에서만 시도
+        if self.config.raw_pixel_match_enabled:
+            has_mask = mask is not None and np.any(mask > 0)
+            if not has_mask:
+                raw_result = self.match_by_raw_pixels(template, frame)
+                if raw_result is not None:
+                    logger.info(
+                        "[0차 raw] 성공: score=%.4f at (%d,%d)",
+                        raw_result.score,
+                        raw_result.x,
+                        raw_result.y,
+                    )
+                    return raw_result
+                logger.info("[0차 raw] 임계값 미달, 1차 에지 시도")
 
         # --- 1차: 에지 기반 멀티스케일 매칭 ---
         best_edge = self.match_by_edges(template, frame, mask)
@@ -200,6 +225,53 @@ class TemplateMatcher:
 
         logger.warning("모든 매칭 전략 실패")
         return None
+
+    def match_by_raw_pixels(
+        self,
+        template: NDArray[np.uint8],
+        frame: NDArray[np.uint8],
+    ) -> MatchResult | None:
+        """원본 픽셀 직접 매칭 (Tier 0 빠른 경로).
+
+        전처리 없이 원본 BGR 이미지에서 TM_CCOEFF_NORMED로 매칭합니다.
+        동일 해상도 화면 캡처처럼 이상적인 조건에서 빠르게 매칭하기 위한
+        1:1 스케일 전용 메서드입니다.
+
+        Args:
+            template: 템플릿 이미지 (BGR)
+            frame: 대상 프레임 (BGR)
+
+        Returns:
+            MatchResult 또는 매칭 실패 시 None
+        """
+        tmpl_h, tmpl_w = template.shape[:2]
+        frame_h, frame_w = frame.shape[:2]
+
+        if tmpl_w > frame_w or tmpl_h > frame_h:
+            return None
+
+        result = cv2.matchTemplate(
+            frame,
+            template,
+            cv2.TM_CCOEFF_NORMED,
+        )
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+        logger.debug(
+            "Tier 0 raw pixel: score=%.4f (threshold=%.4f)",
+            max_val,
+            self.config.raw_pixel_match_threshold,
+        )
+
+        if max_val < self.config.raw_pixel_match_threshold:
+            return None
+
+        return MatchResult(
+            x=max_loc[0],
+            y=max_loc[1],
+            score=max_val,
+            method="raw",
+        )
 
     def match_by_edges(
         self,

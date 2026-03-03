@@ -1466,6 +1466,15 @@ class AnchorDetector:
                 "candidate_nms_radius",
                 _mc_defaults.candidate_nms_radius,
             ),
+            # Tier 0: 원본 픽셀 직접 매칭
+            raw_pixel_match_enabled=matcher_data.get(
+                "raw_pixel_match_enabled",
+                _mc_defaults.raw_pixel_match_enabled,
+            ),
+            raw_pixel_match_threshold=matcher_data.get(
+                "raw_pixel_match_threshold",
+                _mc_defaults.raw_pixel_match_threshold,
+            ),
         )
 
         # 참조 프레임 경로 파싱
