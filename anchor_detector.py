@@ -1475,6 +1475,15 @@ class AnchorDetector:
                 "raw_pixel_match_threshold",
                 _mc_defaults.raw_pixel_match_threshold,
             ),
+            # 디버그 시각화
+            debug_visualize=matcher_data.get(
+                "debug_visualize",
+                _mc_defaults.debug_visualize,
+            ),
+            debug_output_dir=matcher_data.get(
+                "debug_output_dir",
+                _mc_defaults.debug_output_dir,
+            ),
         )
 
         # 참조 프레임 경로 파싱

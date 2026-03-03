@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import NamedTuple
 
 import cv2
@@ -121,6 +122,10 @@ class MatcherConfig:
     top_n_candidates: int = 5
     candidate_nms_radius: int = 20
 
+    # 디버그 시각화
+    debug_visualize: bool = False
+    debug_output_dir: str = "output/debug/template_matching"
+
 
 # ========================================
 # 캐스케이드 템플릿 매처
@@ -142,6 +147,7 @@ class TemplateMatcher:
             clipLimit=self.config.clahe_clip_limit,
             tileGridSize=self.config.clahe_grid_size,
         )
+        self._debug_call_count = 0
 
     # ========================================
     # 공개 API
@@ -169,6 +175,13 @@ class TemplateMatcher:
             MatchResult 또는 매칭 실패 시 None
         """
         # mask=None은 각 하위 메서드에서 자체 처리 (불필요한 제로 배열 생성 방지)
+        debug = self.config.debug_visualize
+        if debug:
+            self._debug_call_count += 1
+            call_dir = (
+                Path(self.config.debug_output_dir)
+                / f"call_{self._debug_call_count:03d}"
+            )
 
         # --- 0차: 원본 픽셀 직접 매칭 (빠른 경로) ---
         # 마스크가 없는 깨끗한 템플릿에서만 시도
@@ -176,6 +189,14 @@ class TemplateMatcher:
             has_mask = mask is not None and np.any(mask > 0)
             if not has_mask:
                 raw_result = self.match_by_raw_pixels(template, frame)
+                if debug:
+                    self._debug_save_match_result(
+                        call_dir,
+                        "tier0_raw",
+                        frame,
+                        template,
+                        raw_result,
+                    )
                 if raw_result is not None:
                     logger.info(
                         "[0차 raw] 성공: score=%.4f at (%d,%d)",
@@ -188,6 +209,15 @@ class TemplateMatcher:
 
         # --- 1차: 에지 기반 멀티스케일 매칭 ---
         best_edge = self.match_by_edges(template, frame, mask)
+        if debug:
+            self._debug_save_match_result(
+                call_dir,
+                "tier1_edge",
+                frame,
+                template,
+                best_edge,
+                mask,
+            )
         if best_edge is not None:
             logger.info(
                 "[1차 에지] 성공: score=%.4f at (%d,%d)",
@@ -201,6 +231,15 @@ class TemplateMatcher:
 
         # --- 2차: AKAZE 특징점 폴백 ---
         feat_result = self.match_by_features(template, frame, mask)
+        if debug:
+            self._debug_save_match_result(
+                call_dir,
+                "tier2_akaze",
+                frame,
+                template,
+                feat_result,
+                mask,
+            )
         if feat_result is not None:
             logger.info(
                 "[2차 AKAZE] 성공: score=%.4f at (%d,%d)",
@@ -214,6 +253,15 @@ class TemplateMatcher:
 
         # --- 3차: mask 기반 폴백 ---
         mask_result = self.match_by_masked_correlation(template, frame, mask)
+        if debug:
+            self._debug_save_match_result(
+                call_dir,
+                "tier3_mask",
+                frame,
+                template,
+                mask_result,
+                mask,
+            )
         if mask_result is not None:
             logger.info(
                 "[3차 mask] 성공: score=%.4f at (%d,%d)",
@@ -865,3 +913,210 @@ class TemplateMatcher:
             return None
 
         return M, inlier_ratio
+
+    # ========================================
+    # 디버그 시각화
+    # ========================================
+    def _debug_save_match_result(
+        self,
+        call_dir: Path,
+        tag: str,
+        frame: NDArray[np.uint8],
+        template: NDArray[np.uint8],
+        result: MatchResult | None,
+        mask: NDArray[np.uint8] | None = None,
+    ) -> None:
+        """매칭 결과를 시각화 이미지로 저장합니다.
+
+        composite(종합), heatmap, frame_with_bbox, template 이미지를 생성합니다.
+        """
+        call_dir.mkdir(parents=True, exist_ok=True)
+
+        frame_bbox = self._debug_draw_bbox(frame, template, result, tag)
+        heatmap = self._debug_create_heatmap(frame, template, mask)
+
+        tmpl_h, tmpl_w = template.shape[:2]
+        info = [
+            f"[Tier]     {tag}",
+            f"[Template] {tmpl_w}x{tmpl_h}",
+            f"[Frame]    {frame.shape[1]}x{frame.shape[0]}",
+        ]
+        if result is not None:
+            info += [
+                f"[Method]   {result.method}",
+                f"[Score]    {result.score:.4f}",
+                f"[Pos]      ({result.x}, {result.y})",
+            ]
+        else:
+            info.append("[Result]   NO MATCH")
+
+        composite = self._debug_compose(frame_bbox, template, heatmap, info)
+
+        cv2.imwrite(str(call_dir / f"{tag}_composite.png"), composite)
+        cv2.imwrite(str(call_dir / f"{tag}_heatmap.png"), heatmap)
+        cv2.imwrite(str(call_dir / f"{tag}_frame.png"), frame_bbox)
+        cv2.imwrite(str(call_dir / f"{tag}_template.png"), template)
+
+        logger.debug(
+            "디버그 시각화 저장: %s/%s_composite.png",
+            call_dir,
+            tag,
+        )
+
+    def _debug_create_heatmap(
+        self,
+        frame: NDArray[np.uint8],
+        template: NDArray[np.uint8],
+        mask: NDArray[np.uint8] | None = None,
+    ) -> NDArray[np.uint8]:
+        """matchTemplate 결과를 JET 컬러맵 히트맵으로 변환합니다."""
+        tmpl_h, tmpl_w = template.shape[:2]
+        frame_h, frame_w = frame.shape[:2]
+        if tmpl_w > frame_w or tmpl_h > frame_h:
+            return np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
+
+        if mask is not None and np.any(mask > 0):
+            match_mask = cv2.bitwise_not(mask)
+            match_mask_3ch = cv2.merge([match_mask, match_mask, match_mask])
+            result_map = cv2.matchTemplate(
+                frame,
+                template,
+                cv2.TM_CCORR_NORMED,
+                mask=match_mask_3ch,
+            )
+            result_map = np.nan_to_num(result_map, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            result_map = cv2.matchTemplate(
+                frame,
+                template,
+                cv2.TM_CCOEFF_NORMED,
+            )
+
+        _, max_val, _, max_loc = cv2.minMaxLoc(result_map)
+
+        normalized = cv2.normalize(result_map, None, 0, 255, cv2.NORM_MINMAX)
+        heatmap = cv2.applyColorMap(normalized.astype(np.uint8), cv2.COLORMAP_JET)
+        heatmap = cv2.resize(
+            heatmap,
+            (frame_w, frame_h),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+        scale_x = frame_w / result_map.shape[1]
+        scale_y = frame_h / result_map.shape[0]
+        marker = (int(max_loc[0] * scale_x), int(max_loc[1] * scale_y))
+        cv2.drawMarker(heatmap, marker, (255, 255, 255), cv2.MARKER_CROSS, 20, 2)
+        cv2.putText(
+            heatmap,
+            f"max={max_val:.4f}",
+            (10, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+        )
+        return heatmap
+
+    def _debug_draw_bbox(
+        self,
+        frame: NDArray[np.uint8],
+        template: NDArray[np.uint8],
+        result: MatchResult | None,
+        tag: str = "",
+    ) -> NDArray[np.uint8]:
+        """프레임에 매칭 바운딩 박스와 정보 텍스트를 오버레이합니다."""
+        canvas = frame.copy()
+        tmpl_h, tmpl_w = template.shape[:2]
+
+        if result is not None:
+            pt1 = (result.x, result.y)
+            pt2 = (result.x + tmpl_w, result.y + tmpl_h)
+            cv2.rectangle(canvas, pt1, pt2, (0, 255, 0), 2)
+            lines = [
+                f"{tag}: method={result.method}  score={result.score:.4f}",
+                f"pos=({result.x}, {result.y})",
+            ]
+        else:
+            lines = [f"{tag}: NO MATCH"]
+            cv2.putText(
+                canvas,
+                "NO MATCH",
+                (20, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.5,
+                (0, 0, 255),
+                3,
+            )
+
+        for i, line in enumerate(lines):
+            cv2.putText(
+                canvas,
+                line,
+                (10, 22 + i * 22),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 255, 255),
+                1,
+            )
+        return canvas
+
+    @staticmethod
+    def _debug_compose(
+        frame_bbox: NDArray[np.uint8],
+        template: NDArray[np.uint8],
+        heatmap: NDArray[np.uint8],
+        info_lines: list[str],
+    ) -> NDArray[np.uint8]:
+        """프레임 + 템플릿 + 히트맵 + 정보를 하나의 종합 이미지로 합성합니다."""
+        frame_h, frame_w = frame_bbox.shape[:2]
+        tmpl_h, tmpl_w = template.shape[:2]
+
+        right_w = max(tmpl_w + 20, 220)
+        tmpl_scale = (right_w - 20) / tmpl_w
+        disp_w = right_w - 20
+        disp_h = int(tmpl_h * tmpl_scale)
+        if disp_h > frame_h // 2:
+            disp_h = frame_h // 2
+            disp_w = int(tmpl_w * (disp_h / tmpl_h))
+        tmpl_disp = cv2.resize(template, (disp_w, disp_h))
+
+        heatmap_h = int(frame_h * 0.4)
+        total_w = frame_w + right_w + 10
+        total_h = frame_h + heatmap_h + 40
+
+        canvas = np.full((total_h, total_w, 3), (30, 30, 30), dtype=np.uint8)
+        canvas[0:frame_h, 0:frame_w] = frame_bbox
+
+        tx, ty = frame_w + 10, 10
+        canvas[ty : ty + disp_h, tx : tx + disp_w] = tmpl_disp
+
+        text_y = ty + disp_h + 25
+        for i, line in enumerate(info_lines):
+            cv2.putText(
+                canvas,
+                line,
+                (tx, text_y + i * 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                (200, 200, 200),
+                1,
+            )
+
+        hm = cv2.resize(heatmap, (total_w, heatmap_h))
+        canvas[frame_h + 40 : frame_h + 40 + heatmap_h, :] = hm
+
+        cv2.line(
+            canvas,
+            (0, frame_h + 35),
+            (total_w, frame_h + 35),
+            (80, 80, 80),
+            1,
+        )
+        cv2.line(
+            canvas,
+            (frame_w + 5, 0),
+            (frame_w + 5, frame_h),
+            (80, 80, 80),
+            1,
+        )
+        return canvas
