@@ -7,13 +7,20 @@ dataclass 기반의 타입 안전한 설정 관리를 제공합니다.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
+
+# ${VAR_NAME} 환경변수 보간 패턴
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
 class FrameSkipMode(Enum):
@@ -190,7 +197,7 @@ class StorageConfig:
     db_user: str = ""
     db_password: str = ""
     db_dsn: str = ""
-    output_dir: Path = field(default_factory=lambda: Path("data/output"))
+    output_dir: Path = field(default_factory=lambda: Path("./data"))
     save_frames: bool = False
     frame_format: str = "jpg"
     frame_quality: int = 85
@@ -217,6 +224,144 @@ class StorageConfig:
 
 
 @dataclass
+class TemplateConfig:
+    """ROI 템플릿 선택 설정
+
+    Attributes:
+        id: 사용할 ROI 템플릿 ID (name보다 우선)
+        name: 사용할 ROI 템플릿 이름
+    """
+
+    id: int | None = None
+    name: str | None = None
+
+
+@dataclass
+class DetectionConfig:
+    """ROI 탐지 설정
+
+    Attributes:
+        auto_detect: 첫 프레임에서 ROI 자동 탐지 여부
+        roi_template_paths: 색상 마커 ROI 템플릿 이미지 경로 목록
+        anchor_config_path: 앵커 기반 ROI 탐지 YAML 파일 경로
+        ssim_threshold: SSIM 변화 감지 임계값 (0.0~1.0)
+        confidence_threshold: OCR 신뢰도 임계값 (0.0~1.0)
+    """
+
+    auto_detect: bool = False
+    roi_template_paths: list[str] = field(default_factory=list)
+    anchor_config_path: str | None = None
+    ssim_threshold: float = 0.95
+    confidence_threshold: float = 0.7
+
+    def __post_init__(self) -> None:
+        """설정 값 검증"""
+        if not 0.0 <= self.ssim_threshold <= 1.0:
+            raise ValueError(
+                f"ssim_threshold는 0.0~1.0 범위여야 합니다: {self.ssim_threshold}"
+            )
+        if not 0.0 <= self.confidence_threshold <= 1.0:
+            raise ValueError(
+                f"confidence_threshold는 0.0~1.0 범위여야 합니다: "
+                f"{self.confidence_threshold}"
+            )
+
+
+@dataclass
+class BatchConfig:
+    """배치 스케줄링 설정
+
+    Attributes:
+        enabled: 배치 스케줄링 모드 활성화 여부
+        watch_dir: 스캔할 비디오 디렉토리 경로
+        interval_seconds: 배치 사이클 간격 (초)
+    """
+
+    enabled: bool = False
+    watch_dir: Path | None = None
+    interval_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        """설정 값 검증 및 타입 변환"""
+        if isinstance(self.watch_dir, str):
+            object.__setattr__(self, "watch_dir", Path(self.watch_dir))
+        if self.interval_seconds < 1:
+            raise ValueError(
+                f"interval_seconds는 1 이상이어야 합니다: {self.interval_seconds}"
+            )
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """overlay를 base에 재귀적으로 병합 (overlay가 우선, base를 변경함)
+
+    Args:
+        base: 기본 딕셔너리 (변경됨)
+        overlay: 덮어쓸 딕셔너리
+
+    Returns:
+        병합된 base 딕셔너리
+    """
+    for key, value in overlay.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def _interpolate_env_vars(data: dict[str, Any]) -> dict[str, Any]:
+    """딕셔너리 내 모든 문자열 값에서 ${VAR_NAME} 패턴을 환경변수로 치환
+
+    Args:
+        data: 치환 대상 딕셔너리 (변경됨)
+
+    Returns:
+        치환된 딕셔너리
+
+    Raises:
+        ValueError: 참조된 환경변수가 설정되지 않은 경우
+    """
+    for key, value in data.items():
+        if isinstance(value, dict):
+            _interpolate_env_vars(value)
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                if isinstance(item, str) and "${" in item:
+                    data[key][i] = _resolve_env_var_string(item, key)
+        elif isinstance(value, str) and "${" in value:
+            data[key] = _resolve_env_var_string(value, key)
+    return data
+
+
+def _resolve_env_var_string(value: str, context_key: str) -> str:
+    """문자열 내 ${VAR} 패턴을 환경변수로 치환
+
+    Args:
+        value: 치환 대상 문자열
+        context_key: 오류 메시지용 설정 키 이름
+
+    Returns:
+        치환된 문자열
+
+    Raises:
+        ValueError: 환경변수가 설정되지 않은 경우
+    """
+
+    def _replacer(match: re.Match[str]) -> str:
+        var_name = match.group(1)
+        env_val = os.getenv(var_name)
+        if env_val is None:
+            raise ValueError(
+                f"환경변수 '{var_name}'이 설정되지 않았습니다. "
+                f"설정 키: '{context_key}'. "
+                f"해결: export {var_name}=값"
+            )
+        return env_val
+
+    return _ENV_VAR_PATTERN.sub(_replacer, value)
+
+
+@dataclass
 class Config:
     """전체 시스템 설정
 
@@ -226,6 +371,9 @@ class Config:
         video_path: 처리할 비디오 파일 경로
         processing: 비디오 처리 설정
         storage: 저장소 설정
+        template: ROI 템플릿 선택 설정
+        detection: ROI 탐지 설정
+        batch: 배치 스케줄링 설정
         rois: 관심 영역 목록
         debug: 디버그 모드 활성화
         log_level: 로깅 레벨
@@ -234,6 +382,9 @@ class Config:
     video_path: Path | None = None
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    template: TemplateConfig = field(default_factory=TemplateConfig)
+    detection: DetectionConfig = field(default_factory=DetectionConfig)
+    batch: BatchConfig = field(default_factory=BatchConfig)
     rois: list[ROIConfig] = field(default_factory=list)
     debug: bool = False
     log_level: str = "INFO"
@@ -324,18 +475,29 @@ class Config:
 
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> Config:
-        """딕셔너리에서 Config 생성"""
-        processing_data = data.get("processing", {})
+        """딕셔너리에서 Config 생성
+
+        주의: 입력 data를 변경하지 않도록 하위 dict를 복사합니다.
+        """
+        processing_data = dict(data.get("processing", {}))
         if "frame_skip_mode" in processing_data:
             processing_data["frame_skip_mode"] = FrameSkipMode(
                 processing_data["frame_skip_mode"]
             )
 
-        storage_data = data.get("storage", {})
+        storage_data = dict(data.get("storage", {}))
         if "output_dir" in storage_data:
             storage_data["output_dir"] = Path(storage_data["output_dir"])
         if "db_port" in storage_data:
             storage_data["db_port"] = int(storage_data["db_port"])
+
+        template_data = dict(data.get("template", {}))
+
+        detection_data = dict(data.get("detection", {}))
+
+        batch_data = dict(data.get("batch", {}))
+        if "watch_dir" in batch_data and batch_data["watch_dir"] is not None:
+            batch_data["watch_dir"] = Path(batch_data["watch_dir"])
 
         rois_data = data.get("rois", [])
         rois = [ROIConfig(**roi) for roi in rois_data]
@@ -344,6 +506,9 @@ class Config:
             video_path=Path(data["video_path"]) if data.get("video_path") else None,
             processing=ProcessingConfig(**processing_data),
             storage=StorageConfig(**storage_data),
+            template=TemplateConfig(**template_data),
+            detection=DetectionConfig(**detection_data),
+            batch=BatchConfig(**batch_data),
             rois=rois,
             debug=data.get("debug", False),
             log_level=data.get("log_level", "INFO"),
@@ -364,6 +529,10 @@ class Config:
                 "max_workers": self.processing.max_workers,
                 "resize_width": self.processing.resize_width,
                 "resize_height": self.processing.resize_height,
+                "parallel_timeout_per_roi": (
+                    self.processing.parallel_timeout_per_roi
+                ),
+                "use_gpu": self.processing.use_gpu,
             },
             "storage": {
                 "db_host": self.storage.db_host,
@@ -376,6 +545,24 @@ class Config:
                 "save_frames": self.storage.save_frames,
                 "frame_format": self.storage.frame_format,
                 "frame_quality": self.storage.frame_quality,
+            },
+            "template": {
+                "id": self.template.id,
+                "name": self.template.name,
+            },
+            "detection": {
+                "auto_detect": self.detection.auto_detect,
+                "roi_template_paths": list(self.detection.roi_template_paths),
+                "anchor_config_path": self.detection.anchor_config_path,
+                "ssim_threshold": self.detection.ssim_threshold,
+                "confidence_threshold": self.detection.confidence_threshold,
+            },
+            "batch": {
+                "enabled": self.batch.enabled,
+                "watch_dir": (
+                    str(self.batch.watch_dir) if self.batch.watch_dir else None
+                ),
+                "interval_seconds": self.batch.interval_seconds,
             },
             "rois": [
                 {
@@ -435,6 +622,108 @@ class Config:
                 current[key] = value
 
         return self._from_dict(current)
+
+    @classmethod
+    def load(
+        cls,
+        config_path: Path | str | None = None,
+        env: str | None = None,
+        cli_overrides: dict[str, Any] | None = None,
+    ) -> Config:
+        """계층형 설정 로드
+
+        우선순위: CLI args > config.{env}.yml > config.yml > 환경변수(secrets) > 기본값
+
+        Args:
+            config_path: 설정 파일 경로. None이면 자동 탐색.
+            env: 환경 이름 (dev, prod 등). None이면 APP_ENV 환경변수 확인.
+            cli_overrides: CLI 인자 오버라이드 딕셔너리 (dot 표기법 지원).
+
+        Returns:
+            병합된 Config 인스턴스
+        """
+        # 1. config 파일 탐색
+        if config_path is None:
+            config_path = cls._discover_config_file()
+
+        # 2. base config 로드 (없으면 기본값)
+        if config_path and Path(config_path).exists():
+            logger.info("설정 파일 로드: %s", config_path)
+            with open(config_path, encoding="utf-8") as f:
+                base_data = yaml.safe_load(f) or {}
+            _interpolate_env_vars(base_data)
+            config = cls._from_dict(base_data)
+        else:
+            if config_path:
+                raise FileNotFoundError(
+                    f"설정 파일을 찾을 수 없습니다: {config_path}\n"
+                    f"  힌트: cp config/config.example.yml config/config.yml"
+                )
+            logger.debug("설정 파일 없음 — 기본값 사용")
+            config = cls()
+
+        # 3. 환경 결정
+        if env is None:
+            env = os.getenv("APP_ENV", "").strip().lower() or None
+
+        # 4. 환경별 오버레이 병합
+        if env and config_path:
+            parent = Path(config_path).parent
+            env_path = parent / f"config.{env}.yml"
+            if not env_path.exists():
+                # .yaml 확장자도 시도
+                env_path = parent / f"config.{env}.yaml"
+            if env_path.exists():
+                logger.info("환경 설정 오버레이 로드: %s", env_path)
+                with open(env_path, encoding="utf-8") as f:
+                    env_data = yaml.safe_load(f) or {}
+                _interpolate_env_vars(env_data)
+                merged = _deep_merge(config.to_dict(), env_data)
+                config = cls._from_dict(merged)
+            else:
+                logger.debug("환경 설정 파일 없음: %s (무시)", env_path)
+
+        # 5. 환경변수에서 민감 정보 로드
+        config = config._apply_env_secrets()
+
+        # 6. CLI 오버라이드 적용
+        if cli_overrides:
+            config = config.with_overrides(**cli_overrides)
+
+        return config
+
+    @classmethod
+    def _discover_config_file(cls) -> Path | None:
+        """표준 위치에서 설정 파일 자동 탐색
+
+        Returns:
+            발견된 설정 파일 경로 또는 None
+        """
+        candidates = [
+            Path("config/config.yml"),
+            Path("config/config.yaml"),
+            Path("config.yml"),
+            Path("config.yaml"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _apply_env_secrets(self) -> Config:
+        """환경변수에서 민감한 정보(DB 비밀번호 등)를 로드하여 오버라이드
+
+        Returns:
+            민감 정보가 적용된 새 Config 인스턴스
+        """
+        overrides: dict[str, Any] = {}
+        if val := os.getenv("DB_PASSWORD"):
+            overrides["storage.db_password"] = val
+        if val := os.getenv("DB_USER"):
+            overrides["storage.db_user"] = val
+        if val := os.getenv("DB_DSN"):
+            overrides["storage.db_dsn"] = val
+        return self.with_overrides(**overrides) if overrides else self
 
 
 @dataclass

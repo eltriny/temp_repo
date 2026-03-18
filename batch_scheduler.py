@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .config import StorageConfig
+from .config import Config, StorageConfig
 from .main import VideoAnalyzerApp
 from .storage.database import (
     DatabaseManager,
@@ -51,6 +51,30 @@ class BatchScheduler:
         storage_config: Oracle 데이터베이스 연결 설정
         interval_seconds: 배치 사이클 간격 (기본 300초 = 5분)
     """
+
+    @classmethod
+    def from_config(cls, config: Config) -> BatchScheduler:
+        """Config 객체에서 BatchScheduler 생성
+
+        Args:
+            config: 병합된 설정 객체
+
+        Returns:
+            BatchScheduler 인스턴스
+        """
+        return cls(
+            watch_dir=config.batch.watch_dir,
+            output_dir=config.storage.output_dir,
+            storage_config=config.storage,
+            template_id=config.template.id,
+            template_name=config.template.name,
+            interval_seconds=config.batch.interval_seconds,
+            use_gpu=config.processing.use_gpu,
+            frame_interval=config.processing.default_interval_sec,
+            ssim_threshold=config.detection.ssim_threshold,
+            confidence_threshold=config.detection.confidence_threshold,
+            max_workers=config.processing.max_workers or None,
+        )
 
     def __init__(
         self,

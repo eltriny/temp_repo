@@ -20,7 +20,7 @@ import sys
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # 상대 임포트를 위한 경로 설정 (스크립트 직접 실행 시)
 if __name__ == "__main__" and __package__ is None:
@@ -85,6 +85,37 @@ class VideoAnalyzerApp:
     사전 정의된 ROI 템플릿을 사용하여 비디오를 분석합니다.
     ROI별 병렬 처리를 지원합니다.
     """
+
+    @classmethod
+    def from_config(cls, config: Config) -> VideoAnalyzerApp:
+        """Config 객체에서 VideoAnalyzerApp 생성
+
+        Args:
+            config: 병합된 설정 객체
+
+        Returns:
+            VideoAnalyzerApp 인스턴스
+        """
+        return cls(
+            video_path=config.video_path,
+            output_dir=config.storage.output_dir,
+            template_id=config.template.id,
+            template_name=config.template.name,
+            use_gpu=config.processing.use_gpu,
+            frame_interval=config.processing.default_interval_sec,
+            ssim_threshold=config.detection.ssim_threshold,
+            confidence_threshold=config.detection.confidence_threshold,
+            max_workers=config.processing.max_workers or None,
+            auto_detect=config.detection.auto_detect,
+            roi_template_paths=[
+                Path(p) for p in config.detection.roi_template_paths
+            ],
+            anchor_config_path=(
+                Path(config.detection.anchor_config_path)
+                if config.detection.anchor_config_path
+                else None
+            ),
+        )
 
     def __init__(
         self,
@@ -1022,17 +1053,28 @@ def show_template_rois(storage_config: StorageConfig, template_id: int) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    """명령행 인자 파싱"""
+    """명령행 인자 파싱
+
+    모든 선택적 인자의 default는 None으로 설정하여
+    "사용자가 명시적으로 지정한 값"과 "미지정"을 구분합니다.
+    실제 기본값은 Config dataclass에서 관리됩니다.
+    """
     parser = argparse.ArgumentParser(
-        description="산업용 비디오 모니터링 분석 프로그램 (v2.0 - 사전 정의 ROI 기반)",
+        description="산업용 비디오 모니터링 분석 프로그램 (v2.0 - YAML 설정 파일 지원)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 사용 예시:
-  # 비디오 분석 (템플릿 ID 지정)
-  python main.py --video input.mp4 --output ./results --template-id 1
+  # 설정 파일 기반 실행
+  python main.py --config config/config.yml
 
-  # 비디오 분석 (템플릿 이름 지정)
-  python main.py --video input.mp4 --output ./results --template "모니터링 레이아웃 A"
+  # 환경별 실행
+  python main.py --config config/config.yml --env prod
+
+  # 설정 파일 + CLI 오버라이드
+  python main.py --config config/config.yml --video input.mp4 --template-id 1
+
+  # 순수 CLI 모드 (설정 파일 없이, 하위 호환)
+  python main.py --video input.mp4 --output ./results --template-id 1
 
   # 템플릿 관리
   python main.py --list-templates
@@ -1041,20 +1083,36 @@ def parse_args() -> argparse.Namespace:
 
   # 배치 스케줄링 모드 (디렉토리 감시, 5분 주기)
   python main.py --watch-dir ./videos --template "모니터링 레이아웃 A"
-
-  # 커스텀 주기 (10분)
-  python main.py --watch-dir ./videos --template-id 1 --batch-interval 600
         """,
     )
 
-    # 비디오 분석 옵션
-    parser.add_argument("--video", "-v", type=Path, help="분석할 비디오 파일 경로")
+    # 설정 파일 옵션
+    parser.add_argument(
+        "--config",
+        "-c",
+        type=Path,
+        default=None,
+        help="설정 파일 경로 (기본값: config/config.yml 자동 탐색)",
+    )
+
+    parser.add_argument(
+        "--env",
+        "-e",
+        type=str,
+        default=None,
+        help="환경 이름 (dev, prod 등). APP_ENV 환경변수도 지원",
+    )
+
+    # 비디오 분석 옵션 (default=None으로 센티넬 패턴 적용)
+    parser.add_argument(
+        "--video", "-v", type=Path, default=None, help="분석할 비디오 파일 경로"
+    )
 
     parser.add_argument(
         "--output",
         "-o",
         type=Path,
-        default=Path("./data"),
+        default=None,
         help="결과 저장 디렉토리 (기본값: ./data)",
     )
 
@@ -1066,12 +1124,21 @@ def parse_args() -> argparse.Namespace:
     )
 
     # 템플릿 선택
-    parser.add_argument("--template-id", type=int, help="사용할 ROI 템플릿 ID")
+    parser.add_argument(
+        "--template-id", type=int, default=None, help="사용할 ROI 템플릿 ID"
+    )
 
-    parser.add_argument("--template", "-t", type=str, help="사용할 ROI 템플릿 이름")
+    parser.add_argument(
+        "--template", "-t", type=str, default=None, help="사용할 ROI 템플릿 이름"
+    )
 
     # 처리 옵션
-    parser.add_argument("--gpu", action="store_true", help="GPU 가속 사용 (PaddleOCR)")
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        default=None,
+        help="GPU 가속 사용 (PaddleOCR)",
+    )
 
     parser.add_argument(
         "--workers",
@@ -1085,24 +1152,28 @@ def parse_args() -> argparse.Namespace:
         "--interval",
         "-i",
         type=float,
-        default=1.0,
+        default=None,
         help="프레임 분석 간격 (초, 기본값: 1.0)",
     )
 
     parser.add_argument(
         "--ssim-threshold",
         type=float,
-        default=0.95,
+        default=None,
         help="SSIM 변화 감지 임계값 (기본값: 0.95)",
     )
 
     parser.add_argument(
-        "--confidence", type=float, default=0.7, help="OCR 신뢰도 임계값 (기본값: 0.7)"
+        "--confidence",
+        type=float,
+        default=None,
+        help="OCR 신뢰도 임계값 (기본값: 0.7)",
     )
 
     parser.add_argument(
         "--auto-detect",
         action="store_true",
+        default=None,
         help="첫 프레임에서 ROI 자동 탐지 (템플릿 불필요)",
     )
 
@@ -1110,6 +1181,7 @@ def parse_args() -> argparse.Namespace:
         "--roi-template",
         nargs="+",
         type=Path,
+        default=None,
         metavar="IMAGE",
         help="색상으로 ROI를 표시한 템플릿 이미지 경로 (복수 가능). "
         "빨강=NUMERIC, 초록=TEXT, 파랑=CHART",
@@ -1118,14 +1190,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--anchor-config",
         type=Path,
+        default=None,
         metavar="YAML",
         help="앵커 기반 ROI 탐지 설정 YAML 파일 경로. "
         "고정 참조점(스니펫/텍스트)을 기준으로 상대 좌표로 ROI를 자동 탐지합니다.",
     )
 
-    parser.add_argument("--debug", action="store_true", help="디버그 모드 활성화")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=None,
+        help="디버그 모드 활성화",
+    )
 
-    # 템플릿 관리 옵션
+    # 템플릿 관리 옵션 (명령 플래그 — 설정이 아닌 동작 지정)
     parser.add_argument(
         "--list-templates", action="store_true", help="등록된 템플릿 목록 출력"
     )
@@ -1135,7 +1213,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--show-template", type=int, metavar="ID", help="템플릿 ROI 상세 정보 출력"
+        "--show-template", type=int, default=None, metavar="ID",
+        help="템플릿 ROI 상세 정보 출력",
     )
 
     # 배치 스케줄링 옵션
@@ -1144,12 +1223,14 @@ def parse_args() -> argparse.Namespace:
     batch_group.add_argument(
         "--batch",
         action="store_true",
+        default=None,
         help="배치 스케줄링 모드 활성화 (--watch-dir 지정 시 자동 활성화)",
     )
 
     batch_group.add_argument(
         "--watch-dir",
         type=Path,
+        default=None,
         metavar="DIR",
         help="스캔할 비디오 디렉토리 경로 (지정 시 배치 모드 자동 실행)",
     )
@@ -1157,7 +1238,7 @@ def parse_args() -> argparse.Namespace:
     batch_group.add_argument(
         "--batch-interval",
         type=int,
-        default=300,
+        default=None,
         metavar="SECONDS",
         help="배치 사이클 간격 (초, 기본값: 300 = 5분)",
     )
@@ -1165,8 +1246,74 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """None이 아닌 CLI 인자만 Config.with_overrides() 형식의 dict로 변환
+
+    Args:
+        args: parse_args()의 반환값
+
+    Returns:
+        dot 표기법 키를 사용하는 오버라이드 딕셔너리
+    """
+    overrides: dict[str, Any] = {}
+
+    # 최상위 필드
+    if args.video is not None:
+        overrides["video_path"] = str(args.video)
+    if args.debug is not None:
+        overrides["debug"] = args.debug
+
+    # template 섹션
+    if args.template_id is not None:
+        overrides["template.id"] = args.template_id
+    if args.template is not None:
+        overrides["template.name"] = args.template
+
+    # detection 섹션
+    if args.auto_detect is not None:
+        overrides["detection.auto_detect"] = args.auto_detect
+    if args.ssim_threshold is not None:
+        overrides["detection.ssim_threshold"] = args.ssim_threshold
+    if args.confidence is not None:
+        overrides["detection.confidence_threshold"] = args.confidence
+    if args.roi_template is not None:
+        overrides["detection.roi_template_paths"] = [
+            str(p) for p in args.roi_template
+        ]
+    if args.anchor_config is not None:
+        overrides["detection.anchor_config_path"] = str(args.anchor_config)
+
+    # processing 섹션
+    if args.gpu is not None:
+        overrides["processing.use_gpu"] = args.gpu
+    if args.workers is not None:
+        overrides["processing.max_workers"] = args.workers
+    if args.interval is not None:
+        overrides["processing.default_interval_sec"] = args.interval
+
+    # storage 섹션
+    if args.output is not None:
+        overrides["storage.output_dir"] = str(args.output)
+    if args.db_dsn is not None:
+        overrides["storage.db_dsn"] = args.db_dsn
+
+    # batch 섹션
+    if args.batch is not None:
+        overrides["batch.enabled"] = args.batch
+    if args.watch_dir is not None:
+        overrides["batch.watch_dir"] = str(args.watch_dir)
+        overrides["batch.enabled"] = True  # --watch-dir은 batch 모드 암시
+    if args.batch_interval is not None:
+        overrides["batch.interval_seconds"] = args.batch_interval
+
+    return overrides
+
+
 def main():
-    """메인 진입점"""
+    """메인 진입점
+
+    설정 우선순위: CLI args > config.{env}.yml > config.yml > 환경변수 > 기본값
+    """
     args = parse_args()
 
     # ★ Windows DLL 충돌 방지: 프로세스 최초 시점에서 torch DLL 선점 로드
@@ -1177,100 +1324,117 @@ def main():
     except (ImportError, OSError):
         pass  # torch 미설치 또는 로드 실패 시 무시
 
-    # 디버그 모드
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # ===== 설정 로드 (YAML + CLI 오버라이드 병합) =====
+    cli_overrides = build_cli_overrides(args)
+    try:
+        config = Config.load(
+            config_path=args.config,
+            env=args.env,
+            cli_overrides=cli_overrides,
+        )
+    except FileNotFoundError as e:
+        print(f"오류: {e}")
+        sys.exit(1)
+    except ValueError as e:
+        print(f"설정 오류: {e}")
+        sys.exit(1)
 
-    # 데이터베이스 설정 결정
-    storage_config = StorageConfig(output_dir=args.output)
-    if args.db_dsn:
-        storage_config = StorageConfig(db_dsn=args.db_dsn, output_dir=args.output)
+    # 디버그 모드
+    if config.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     # 템플릿 관리 명령
     if args.list_templates:
-        list_templates(storage_config)
+        list_templates(config.storage)
         return
 
     if args.create_template:
-        create_template_interactive(storage_config)
+        create_template_interactive(config.storage)
         return
 
     if args.show_template:
-        show_template_rois(storage_config, args.show_template)
+        show_template_rois(config.storage, args.show_template)
         return
 
-    # --video와 --watch-dir 동시 지정 방지
-    if args.video and args.watch_dir:
-        print("오류: --video와 --watch-dir은 동시에 사용할 수 없습니다.")
-        print("  단일 분석: python main.py --video input.mp4 --template-id 1")
-        print("  배치 모드: python main.py --watch-dir ./videos --template-id 1")
-        sys.exit(1)
-
-    # 배치 스케줄링 모드: --batch 또는 --watch-dir 지정 시 진입
-    if args.batch or args.watch_dir:
-        if not args.watch_dir:
-            print("오류: --batch 모드에는 --watch-dir이 필요합니다.")
-            sys.exit(1)
-
-        if not args.watch_dir.exists():
-            print(f"오류: watch-dir이 존재하지 않습니다: {args.watch_dir}")
-            sys.exit(1)
-
-        if not args.template_id and not args.template:
-            print("오류: 배치 모드에는 --template 또는 --template-id가 필요합니다.")
-            sys.exit(1)
-
-        from .batch_scheduler import BatchScheduler
-
-        scheduler = BatchScheduler(
-            watch_dir=args.watch_dir,
-            output_dir=args.output,
-            storage_config=storage_config,
-            template_id=args.template_id,
-            template_name=args.template,
-            interval_seconds=args.batch_interval,
-            use_gpu=args.gpu,
-            frame_interval=args.interval,
-            ssim_threshold=args.ssim_threshold,
-            confidence_threshold=args.confidence,
-            max_workers=args.workers,
-        )
-        scheduler.run()
+    # 배치 모드
+    if config.batch.enabled or config.batch.watch_dir:
+        _run_batch_mode(config)
         return
 
     # 단일 비디오 분석
-    if not args.video:
-        print("오류: --video 또는 --watch-dir 옵션이 필요합니다.")
+    if not config.video_path:
+        print("오류: --video 또는 config 파일에 video_path가 필요합니다.")
+        print("  설정 파일: python main.py --config config/config.yml")
         print("  단일 분석: python main.py --video input.mp4 --template-id 1")
         print("  배치 모드: python main.py --watch-dir ./videos --template-id 1")
         print("  도움말: python main.py --help")
         sys.exit(1)
 
-    if not args.video.exists():
-        logger.error(f"비디오 파일을 찾을 수 없습니다: {args.video}")
+    _run_single_analysis(config)
+
+
+def _run_batch_mode(config: Config) -> None:
+    """배치 스케줄링 모드 실행
+
+    Args:
+        config: 병합된 설정 객체
+    """
+    if not config.batch.watch_dir:
+        print("오류: 배치 모드에는 --watch-dir 또는 config의 batch.watch_dir이 필요합니다.")
         sys.exit(1)
 
-    roi_template_paths = getattr(args, "roi_template", None) or []
+    if not config.batch.watch_dir.exists():
+        print(f"오류: watch-dir이 존재하지 않습니다: {config.batch.watch_dir}")
+        sys.exit(1)
 
-    # --roi-template 파일 존재 확인
-    for path in roi_template_paths:
+    if not config.template.id and not config.template.name:
+        print("오류: 배치 모드에는 --template 또는 --template-id가 필요합니다.")
+        sys.exit(1)
+
+    # --video와 --watch-dir 동시 지정 방지
+    if config.video_path and config.batch.watch_dir:
+        print("오류: video_path와 batch.watch_dir은 동시에 사용할 수 없습니다.")
+        print("  단일 분석: python main.py --video input.mp4 --template-id 1")
+        print("  배치 모드: python main.py --watch-dir ./videos --template-id 1")
+        sys.exit(1)
+
+    from .batch_scheduler import BatchScheduler
+
+    scheduler = BatchScheduler.from_config(config)
+    scheduler.run()
+
+
+def _run_single_analysis(config: Config) -> None:
+    """단일 비디오 분석 실행
+
+    Args:
+        config: 병합된 설정 객체
+    """
+    if not config.video_path.exists():
+        logger.error(f"비디오 파일을 찾을 수 없습니다: {config.video_path}")
+        sys.exit(1)
+
+    # ROI 템플릿 이미지 파일 존재 확인
+    for path_str in config.detection.roi_template_paths:
+        path = Path(path_str)
         if not path.exists():
             print(f"오류: 템플릿 이미지를 찾을 수 없습니다: {path}")
             sys.exit(1)
 
-    anchor_config = getattr(args, "anchor_config", None)
+    # 앵커 설정 파일 존재 확인
+    if config.detection.anchor_config_path:
+        anchor_path = Path(config.detection.anchor_config_path)
+        if not anchor_path.exists():
+            print(f"오류: 앵커 설정 파일을 찾을 수 없습니다: {anchor_path}")
+            sys.exit(1)
 
-    # --anchor-config 파일 존재 확인
-    if anchor_config and not anchor_config.exists():
-        print(f"오류: 앵커 설정 파일을 찾을 수 없습니다: {anchor_config}")
-        sys.exit(1)
-
+    # ROI 탐지 방법 확인
     if (
-        not roi_template_paths
-        and not args.auto_detect
-        and not args.template_id
-        and not args.template
-        and not anchor_config
+        not config.detection.roi_template_paths
+        and not config.detection.auto_detect
+        and not config.template.id
+        and not config.template.name
+        and not config.detection.anchor_config_path
     ):
         print(
             "오류: --template-id, --template, --auto-detect, --roi-template, "
@@ -1288,20 +1452,7 @@ def main():
         sys.exit(1)
 
     try:
-        app = VideoAnalyzerApp(
-            video_path=args.video,
-            output_dir=args.output,
-            template_id=args.template_id,
-            template_name=args.template,
-            use_gpu=args.gpu,
-            frame_interval=args.interval,
-            ssim_threshold=args.ssim_threshold,
-            confidence_threshold=args.confidence,
-            max_workers=args.workers,
-            auto_detect=args.auto_detect,
-            roi_template_paths=roi_template_paths,
-            anchor_config_path=anchor_config,
-        )
+        app = VideoAnalyzerApp.from_config(config)
         app.run()
 
     except KeyboardInterrupt:
