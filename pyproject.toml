@@ -1,0 +1,158 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "video-detection"
+version = "0.1.0"
+description = "Industrial video monitoring system with object detection and OCR"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Video Detection Team" }
+]
+keywords = ["video", "detection", "ocr", "monitoring", "industrial"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+# ---------------------------------------------------------------------------
+# 런타임 의존성 (SSOT). requirements.txt 는 pyproject.toml 을 가리키는 pointer.
+# ---------------------------------------------------------------------------
+dependencies = [
+    # image / video
+    "numpy>=1.24.0,<2.0",                  # PaddleOCR 2.7.x 는 NumPy 1.x 필요
+    "opencv-python>=4.6.0,<4.7.0",         # PaddleOCR 2.7.x 호환 상한
+    "opencv-contrib-python>=4.6.0,<4.7.0",
+    "scikit-image>=0.21.0",
+    "Pillow>=10.0.0",
+    "scipy>=1.10.0",                       # FFT / Wiener 등 고급 이미지 처리
+
+    # OCR
+    "paddlepaddle>=2.5.0,<3.0",            # CPU. GPU 는 paddlepaddle-gpu 별도
+    "paddleocr>=2.7.0,<3.0",               # 3.x 는 API 호환성 문제
+    "easyocr>=1.7.0",
+    "pytesseract>=0.3.10",                 # tesseract-ocr 바이너리 별도 필요
+
+    # text
+    "python-Levenshtein>=0.21.0",
+
+    # config / secrets
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+
+    # database (PostgreSQL)
+    "psycopg[binary]>=3.2,<4",             # thin wheel, libpq 동봉
+    "psycopg-pool>=3.2,<4",                # ConnectionPool (별도 패키지)
+    "tenacity>=8.2,<10",                   # retry / backoff
+
+    # ops
+    "psutil>=5.9",                          # 디스크/메모리 모니터링
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12",
+    "freezegun>=1.4",
+    "mypy>=1.5.0",
+    "ruff>=0.1.0",
+    "pre-commit>=3.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+exclude = ["tests"]
+
+# 외부 무거운 의존성의 타입 스텁 부재를 허용 (실제 타입 검사는 src/ 한정).
+[[tool.mypy.overrides]]
+module = [
+    "cv2.*",
+    "paddleocr.*",
+    "paddle.*",
+    "paddlepaddle.*",
+    "easyocr.*",
+    "pytesseract.*",
+    "skimage.*",
+    "scipy.*",
+    "PIL.*",
+    "Levenshtein.*",
+    "psycopg.*",
+    "psycopg_pool.*",
+    "tenacity.*",
+    "psutil.*",
+    "dotenv.*",
+]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "ARG",  # flake8-unused-arguments
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+    "C901",   # too complex — Phase 2 이후 재활성화 (max-complexity=12)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests that require a real PostgreSQL instance",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+omit = [
+    "src/tools/*",
+    "src/visualization/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
