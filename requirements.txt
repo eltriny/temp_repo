@@ -1,13 +1,44 @@
-# ============================================================================
-# requirements.txt — pyproject.toml 포인터.
-# ============================================================================
-# 실제 의존성 정의는 pyproject.toml 의 [project.dependencies] 입니다 (SSOT).
-# 개발 환경 설정:
-#
-#   pip install -e .[dev]
-#
-# CI / 재현 가능한 잠금이 필요할 경우 pip-compile 산출물을
-# requirements.lock 으로 별도 관리할 것.
-# ============================================================================
+# 산업용 비디오 모니터링 분석 프로그램 의존성
 
--e .
+# 영상 처리
+opencv-python>=4.6.0  # PaddleOCR 2.7.x 호환성
+numpy>=1.24.0,<2.0  # PaddleOCR 2.7.x는 NumPy 1.x 필요
+
+# OCR - 기본 엔진
+paddlepaddle>=2.5.0,<3.0  # CPU 버전, GPU는 paddlepaddle-gpu 사용
+paddleocr>=2.7.0,<3.0  # 3.x는 API 호환성 문제
+
+# OCR - 앙상블 엔진 (선택, 인식률 개선)
+easyocr>=1.7.0  # 다국어 OCR, 복잡한 배경에 강함
+pytesseract>=0.3.10  # Tesseract 바인딩 (tesseract-ocr 바이너리 필요)
+
+# 이미지 처리
+scikit-image>=0.21.0
+Pillow>=10.0.0
+scipy>=1.10.0  # FFT, Wiener 필터 등 고급 이미지 처리
+
+# 텍스트 처리
+python-Levenshtein>=0.21.0  # 문자열 유사도 (선택)
+
+# 설정 관리
+PyYAML>=6.0
+
+# Oracle Database 드라이버
+oracledb>=2.0.0  # thin 모드 - 별도 Oracle Client 불필요
+
+# 구조화 로깅
+python-json-logger>=2.0.0  # 구조화된 JSON 로깅 지원
+
+# 개발 도구 (선택)
+# pytest>=7.0.0
+# pytest-asyncio>=0.21.0
+# black>=23.0.0
+# mypy>=1.0.0
+
+# ========================================
+# 시스템 의존성 (apt/brew로 설치 필요)
+# ========================================
+# Tesseract OCR 바이너리:
+#   Ubuntu/Debian: sudo apt install tesseract-ocr tesseract-ocr-kor
+#   macOS: brew install tesseract tesseract-lang
+#   Windows: https://github.com/UB-Mannheim/tesseract/wiki

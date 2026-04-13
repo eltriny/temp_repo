@@ -258,14 +258,13 @@ class VideoProcessor:
             정규화된 차이 점수 (0.0 = 동일, 1.0 = 완전히 다름)
         """
         # 그레이스케일 변환 후 리사이즈 (1채널 리사이즈가 3채널보다 ~3배 빠름)
-        # 1920x1080 원본(~2M px) → 160x90(~14K px) 로 ~143배 연산량 감소.
         small_size = (160, 90)
         gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
         small1 = cv2.resize(gray1, small_size)
         small2 = cv2.resize(gray2, small_size)
 
-        # 절대 차이 계산 — 반드시 리사이즈된 small1/small2 사용 (C-09 회귀 방지)
+        # 절대 차이 계산
         diff = cv2.absdiff(small1, small2)
         score = float(np.mean(diff) / 255.0)
 
