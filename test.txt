@@ -1,5 +1,0 @@
-  프로그램: python
-  인수: -m src.main --watch-dir C:\videos --template-id 1
-  시작 위치: E:\Development\Workspace\video_detection
-  트리거: 5분마다 반복
-  설정: "이미 실행 중이면 새 인스턴스 시작 안 함" ✓
